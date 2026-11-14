@@ -210,8 +210,9 @@ def cmd_lint(args) -> int:
 
 CSS = """
 :root{--bg:#faf7f0;--fg:#26241f;--muted:#8b8478;--line:#e6e1d3;--accent:#9a3324;
---accent-soft:#f1e3de;--code:#f2efe6;--serif:Georgia,"Times New Roman","Adobe 宋体 Std L",
-"华文中宋","宋体",serif;--sans:"Segoe UI","Microsoft YaHei UI","Noto Sans SC",sans-serif;
+--accent-soft:#f1e3de;--code:#f2efe6;--serif:"Times New Roman","Adobe 宋体 Std L","华文中宋","宋体",Georgia,serif;
+--math:"Cambria Math","DejaVu Math TeX Gyre","Times New Roman",serif;
+--sans:"Segoe UI","Microsoft YaHei UI","Noto Sans SC",sans-serif;
 --mono:ui-monospace,SFMono-Regular,Consolas,monospace}
 @media (prefers-color-scheme:dark){:root{--bg:#191713;--fg:#e8e4d9;--muted:#95908a;
 --line:#33302a;--accent:#d9927f;--accent-soft:#3a241d;--code:#211f1b}}
@@ -253,6 +254,12 @@ font-size:.76em;font-family:var(--mono);line-height:1.5;text-decoration:none}
 a.ts:hover{opacity:1;background:var(--accent-soft);border-radius:3px}
 code{background:var(--code);padding:1px 6px;border-radius:3px;font-size:.82em;
 font-family:var(--mono)}
+.op{font-family:var(--math);font-style:normal}
+pre.code{background:var(--code);border:1px solid var(--line);border-radius:6px;
+padding:14px 18px;overflow:auto;font-family:var(--mono);font-size:.82em;line-height:1.7}
+sub,sup{font-size:.72em;line-height:0;position:relative;vertical-align:baseline}
+sup{top:-.45em}
+sub{bottom:-.2em}
 .src{color:var(--muted);font-size:13px;line-height:1.75;margin:0 0 30px;padding:0 0 4px 14px;
 border-left:2px solid var(--line);font-family:var(--sans)}
 section.sec-考点 h2{color:var(--warn);border-bottom-color:var(--warn)}
@@ -271,8 +278,47 @@ a.ts{color:#000;border:0;padding:0}}
 """
 
 
+# Formula notation -> real sub/sup. The notes write ASCII (`E_n`, `Y_lm`, `e^{ikx}`)
+# because that's what survives transcription and grep; the *renderer* owns typography.
+# Multi-char subs are whitelisted from a full inventory of all 24 notes -- a greedy
+# alnum run would cut `L̂_zY_lm` as "zY". Extend the tuple when new index pairs appear.
+SUB_MULTI = ("nlm", "ljm", "ijk", "nt", "αβγ", "βk", "αk", "lm", "nk", "mk", "nl",
+             "nm", "nn", "mn", "n0", "zk", "ij", "ji", "jl", "jj", "kl", "jk", "kj",
+             "kk", "ii", "BT", "αβ", "jm")
+SUB_ONE = "[A-Za-z0-9\u0370-\u03FF]"
+SUB_BRACE = re.compile(r"([_^])\{([^{}]*)\}")
+SUB_MULTI_RE = re.compile(r"_(" + "|".join(SUB_MULTI) + r")(?![A-Za-z0-9])")
+SUB_ONE_RE = re.compile(r"_(" + SUB_ONE + r")(?![A-Za-z0-9])")
+SUP_BARE_RE = re.compile(r"\^(?=[mlxXk])([A-Za-z0-9])(?![A-Za-z0-9])")
+# Combining circumflex/macron/tilde: Georgia etc. lack mark anchors, so the hat
+# drifts off the letter. Cambria Math has proper mark-to-base positioning.
+HAT_RE = re.compile(r"([A-Za-z\u0370-\u03FF][\u0302\u0304\u0303])")
+
+
+def _fx_inner(text: str) -> str:
+    """Inside a brace group the whole content is one sub/sup expression, so every
+    `_` is a genuine subscript marker with no boundary ambiguity: greedy."""
+    text = re.sub(r"_([A-Za-z0-9\u0370-\u03FF]{1,4})", r"<sub>\1</sub>", text)
+    return HAT_RE.sub(r'<span class="op">\1</span>', text)
+
+
+def _fx(text: str) -> str:
+    """Convert ASCII sub/sup to <sub>/<sup> and wrap operator hats. Display-only."""
+    prev = None
+    while prev != text:  # brace forms first; their contents may nest bare forms
+        prev = text
+        text = SUB_BRACE.sub(
+            lambda m: (f"<sub>{_fx_inner(m.group(2))}</sub>" if m.group(1) == "_"
+                       else f"<sup>{_fx_inner(m.group(2))}</sup>"), text)
+    text = SUB_MULTI_RE.sub(r"<sub>\1</sub>", text)
+    text = SUB_ONE_RE.sub(r"<sub>\1</sub>", text)
+    text = SUP_BARE_RE.sub(r"<sup>\1</sup>", text)
+    text = HAT_RE.sub(r'<span class="op">\1</span>', text)
+    return text
+
+
 def inline_md(text: str) -> str:
-    """Tiny inline renderer: code spans, bold, links, timestamp chips."""
+    """Tiny inline renderer: code spans, bold, links, timestamp chips, formula subs."""
     text = html.escape(text, quote=False)
     out = []
     for part in re.split(r"(`[^`]+`)", text):
@@ -280,6 +326,7 @@ def inline_md(text: str) -> str:
             out.append(f"<code>{part[1:-1]}</code>")
             continue
         part = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", part)
+        part = _fx(part)
         part = re.sub(
             r"\[([^\]]+)\]\((https?://[^)]+)\)",
             lambda m: f'<a class="ts" href="{m.group(2)}" target="_blank" rel="noopener">{m.group(1)}</a>'
@@ -307,7 +354,15 @@ def render_file(path: Path, html_dir: Path | None = None) -> tuple[str, str, lis
     section_open = False
     item: list[str] = []  # text of the <li> being built, including its continuation lines
     quote: list[str] = []  # consecutive '> ' lines form one paragraph
+    fence: list[str] | None = None  # inside ``` block: lines collected verbatim
     part = part_of(path) or 0
+
+    def flush_fence() -> None:
+        nonlocal fence
+        if fence is not None:
+            body.append('<pre class="code"><code>'
+                        + html.escape("\n".join(fence), quote=False) + "</code></pre>")
+            fence = None
 
     def flush_item() -> None:
         if item:
@@ -348,11 +403,19 @@ def render_file(path: Path, html_dir: Path | None = None) -> tuple[str, str, lis
         in_table = False
 
     for line in lines:
+        if fence is not None:
+            if line.lstrip().startswith("```"):
+                flush_fence()
+            else:
+                fence.append(line)
+            continue
+        flush_fence()
         if not line.startswith("> "):
             flush_quote()
         if line.startswith("```"):
             flush_para()
             close_lists()
+            fence = []
             continue
         if line.startswith("# "):
             title = line[2:].strip()
@@ -391,7 +454,7 @@ def render_file(path: Path, html_dir: Path | None = None) -> tuple[str, str, lis
             src = (os.path.relpath(full, html_dir).replace("\\", "/")
                    if html_dir else raw.as_posix())
             alt = m.group(1).strip()
-            cap = f"<figcaption>{html.escape(alt, quote=False)}</figcaption>" if alt else ""
+            cap = f"<figcaption>{inline_md(alt)}</figcaption>" if alt else ""
             body.append(f'<figure class="fig"><img src="{html.escape(src, quote=True)}" '
                         f'alt="{html.escape(alt, quote=False)}" loading="lazy">{cap}</figure>')
             continue
@@ -435,6 +498,7 @@ def render_file(path: Path, html_dir: Path | None = None) -> tuple[str, str, lis
     flush_para()
     flush_table()
     close_lists()
+    flush_fence()
     if section_open:
         body.append("</section>")
     return title, "\n".join(body), toc
@@ -483,12 +547,47 @@ def cmd_html(args) -> int:
 <main class="main">
 {''.join(body)}
 <p class="foot">时间戳链接会打开 B 站并跳到对应秒数（需联网）。本页本身离线可读，
-无外部依赖。公式以 Unicode 文本呈现。</p>
+无外部依赖。公式为 Unicode + HTML 上下标排版；插图来自课件整页渲染。</p>
 </main></div></body></html>
 """
     out.write_text(doc, encoding="utf-8")
     size = out.stat().st_size / 1024
     print(f"[done] {out}  {len(entries)} 讲  {size:.0f} KB")
+    return 0
+
+
+# --------------------------------------------------------------------------- fxcheck
+
+LEFTOVER_RE = re.compile(r"[A-Za-z\u0370-\u03FF][\u0302\u0304\u0303]?_[A-Za-z0-9\u0370-\u03FF]")
+
+
+def cmd_fxcheck(args) -> int:
+    """Scan rendered notes for formula notation the renderer failed to convert.
+
+    The render-level conversion is display-only, so the md sources stay ASCII and this
+    check is what stands between a new lecture and a page full of literal `_n`.
+    Image lines are skipped (their paths legitimately contain underscores), and anything
+    the converter already turned into <sub>/<sup> has lost its underscore, so a leftover
+    match is a real miss.
+    """
+    bad, files = 0, 0
+    for path in note_files(args.targets):
+        misses = []
+        for i, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+            if line.lstrip().startswith("!["):
+                continue
+            hits = LEFTOVER_RE.findall(re.sub(r"<[^>]+>", "", inline_md(line)))
+            if hits:
+                misses.append(f"{path.name}:{i}  {' '.join(hits[:6])}")
+        if misses:
+            files += 1
+            bad += len(misses)
+            print("\n".join(misses))
+    print(f"[fxcheck] 未转换公式残留 {bad} 处，涉及 {files} 个文件")
+    if bad:
+        print("\n残留说明转换规则没接住（或源文件粘连串没拆），别靠人工肉眼兜底。",
+              file=sys.stderr)
+        return 1 if not args.warn else 0
     return 0
 
 
@@ -510,6 +609,11 @@ def main() -> int:
     p.add_argument("targets", nargs="+")
     p.add_argument("--warn", action="store_true", help="只报告，不返回非零退出码")
     p.set_defaults(func=cmd_lint)
+
+    p = sub.add_parser("fxcheck", help="检查渲染后是否残留未转换的公式记法")
+    p.add_argument("targets", nargs="+")
+    p.add_argument("--warn", action="store_true", help="只报告，不返回非零退出码")
+    p.set_defaults(func=cmd_fxcheck)
 
     p = sub.add_parser("html", help="生成单页自包含复习笔记")
     p.add_argument("targets", nargs="+")
