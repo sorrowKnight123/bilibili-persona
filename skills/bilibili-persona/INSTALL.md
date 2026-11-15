@@ -12,7 +12,7 @@
 设置 → 插件管理 → **发现** → `+` → 添加插件市场，粘贴仓库地址：
 
 ```
-https://github.com/sorrowKnight123/video-to-skill-
+https://github.com/sorrowKnight123/bilibili-persona
 ```
 
 装好后 skill 自动启用，命令 `/learn-course <BV号>`。
