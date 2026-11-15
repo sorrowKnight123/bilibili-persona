@@ -18,16 +18,19 @@ personas/<讲师>/     人格：他怎么讲、怎么判断、怎么押考点   
 # 1. 依赖（yt-dlp 必需；faster-whisper 只在没字幕时需要）
 uv pip install yt-dlp faster-whisper pypdf
 
-# 2. 看看有哪些分P
-python scripts/bili_fetch.py list BV1xxxxxxxxx
+# 2. skill 目录（下文所有命令里的 $SKILL_DIR 都指它）
+SKILL_DIR=skills/bilibili-persona
 
-# 3. 下音频 + 转写（国内先设镜像，见下方「常见问题」）
-python scripts/bili_fetch.py audio BV1xxxxxxxxx -I 1-5 -o downloads
-python scripts/transcribe.py downloads/ -o transcripts
+# 3. 看看有哪些分P
+python "$SKILL_DIR/scripts/bili_fetch.py" list BV1xxxxxxxxx
 
-# 自动挖术语纠错表（有课件更好；先看证据表再落盘）
-python scripts/glossary.py transcripts/ --reference <知识库>/references/课件笔记     -o 术语表.auto.json
-python scripts/transcribe.py --apply-glossary 术语表.auto.json transcripts/ --dry-run
+# 4. 下音频 + 转写（国内先设镜像，见下方「常见问题」）
+python "$SKILL_DIR/scripts/bili_fetch.py" audio BV1xxxxxxxxx -I 1-5 -o downloads
+python "$SKILL_DIR/scripts/transcribe.py" downloads/ -o transcripts
+
+# 5. 自动挖术语纠错表（有课件更好；先看证据表再落盘）
+python "$SKILL_DIR/scripts/glossary.py" transcripts/ --reference <知识库>/references/课件笔记 -o 术语表.auto.json
+python "$SKILL_DIR/scripts/transcribe.py" --apply-glossary 术语表.auto.json transcripts/ --dry-run
 ```
 
 然后在 ZCode 里说：「帮我把这门课做成知识库 `https://www.bilibili.com/video/BV1xxxxxxxxx`」，
@@ -41,12 +44,12 @@ ZCode → 设置 → 插件管理 → **发现** → `+` → 添加插件市场�
 https://github.com/sorrowKnight123/video-to-skill-
 ```
 
-装好后 skill 默认启用。不想用市场的话，把 `skills/`、`scripts/`、`personas/_methods/`
+装好后 skill 默认启用。不想用市场的话，把 `skills/bilibili-persona/`
+（自包含：SKILL.md + 全部脚本都在这一个目录里）和 `personas/_methods/`
 拷进你的项目也一样用。
 
-**其他 agent（Codex / DSH 等）**：本插件没有运行时——`SKILL.md` 是给 AI 读的工作流，
-脚本全是命令行 Python。把上面三个目录放进你的 agent 能读到的位置，让它按 SKILL.md
-执行即可；文中 `<插件根>` 指存放这些文件的目录。规范写了一份，哪个 agent 跑都一样。
+**其他 agent（Codex / DSH / Claude Code 等）**：见 **[在任何 agent 里使用](#在任何-agent-里使用)**，
+一页说明 + 一段可以直接复制给 AI 的适配指令。
 
 ## 产物长什么样
 
@@ -160,7 +163,7 @@ Windows 上只有一件事要保证：**`cublas64_12.dll` 能被找到**。
 换一个真正做语音转写的 OpenAI 兼容服务（如硅基流动 `https://api.siliconflow.cn/v1`，
 模型 `FunAudioLLM/SenseVoiceSmall`），或者用 `--engine local` 在本机转。
 
-想在没有密钥的情况下验证云链路，跑 `python scripts/mock_asr.py`，再按它输出的提示调用。
+想在没有密钥的情况下验证云链路，跑 `python "$SKILL_DIR/scripts/mock_asr.py"`，再按它输出的提示调用。
 
 ### 需要登录态的内容取不到
 
@@ -190,6 +193,7 @@ firefox 那个 profile 从没用过。
 | `yt-dlp` | 可选（`bili_fetch.py` 是主路径，yt-dlp 是备选） | `uv pip install yt-dlp` |
 | `faster-whisper` | 本地转写（**不需要 torch**） | `uv pip install faster-whisper` |
 | `pypdf` | 读 PDF 课件 | `uv pip install pypdf` |
+| `pypinyin` | 自动挖术语词表的拼音信号（约 2MB 纯 Python，缺失时跳过该信号） | `uv pip install pypinyin` |
 | `ffmpeg` | 云 ASR 切分长音频、解码校验 | 系统包管理器 / gyan.dev 版 |
 | `MINERU_API_TOKEN` | 扫描件课件走云 OCR 时 | mineru.net 免费申请 |
 
@@ -234,20 +238,36 @@ Qwen3-ASR-1.7B 中文术语确实更准（实测同一段课程音频：术语�
 术语准确率我们用词表纠错就能拿到（同一段音频里 Whisper 错的那 4 个术语，词表全修掉了），
 成本近乎零。**所以它不做默认引擎**；需要极限术语准确率时再考虑做成可选引擎。
 
+## 在任何 agent 里使用
+
+skill 目录是**自包含**的（SKILL.md + 全部脚本都在 `skills/bilibili-persona/` 一个目录里），
+拷到哪里都能用：
+
+- **ZCode / Claude Code**：marketplace 安装（格式兼容），或拷目录到各自的 skills 位置
+- **Codex / DSH / 其他**：拷目录 + 对 AI 说一段话——原文在
+  **[`skills/bilibili-persona/INSTALL.md`](skills/bilibili-persona/INSTALL.md)**，复制即可
+- **兜底**：SKILL.md 本质是份工作流文档，直接丢给任何能读文件、能跑命令的 AI 也能用
+
+适配约定只有一条：文中 `$SKILL_DIR` = SKILL.md 所在目录，脚本都在 `$SKILL_DIR/scripts/` 下。
+
 ## 目录结构
 
 ```
 marketplace.json                       插件市场清单
 .zcode-plugin/plugin.json              插件清单
-skills/bilibili-persona/SKILL.md       工作流（阶段 0–7）
 commands/learn-course.md               /learn-course <BV号>
-scripts/bili_fetch.py                  列分P / 下音频 / 存原生字幕
-scripts/transcribe.py                  转写（云/本地）+ 术语纠错
-scripts/stamp.py                       时间戳链接化 + 强绑检查 + 单页复习笔记
-scripts/glossary.py                    自动挖掘术语纠错词表（拼音信号，无需 API）
-scripts/materials.py                   课件解析（本地优先，扫描件可走云 OCR）
-scripts/mock_asr.py                    假 ASR 服务，验证云链路
 personas/_methods/                     三个教学法叠加层模板
+skills/bilibili-persona/               ← 整个 skill 是自包含的，拷走即用
+├── SKILL.md                           工作流（阶段 0–7）+ 写作规范
+├── INSTALL.md                         装到任何 agent 的说明
+└── scripts/
+    ├── bili_fetch.py                  列分P / 下音频 / 存原生字幕 / 找配套资料
+    ├── transcribe.py                  转写（云/本地）+ 术语纠错
+    ├── stamp.py                       时间戳链接化 + 强绑检查 + 单页复习笔记
+    ├── glossary.py                    自动挖掘术语纠错词表（拼音信号，无需 API）
+    ├── materials.py                   课件解析（本地优先，扫描件可走云 OCR）
+    ├── illustrate.py                  课件原图进笔记（按格式自适应取图）
+    └── mock_asr.py                    假 ASR 服务，验证云链路
 ```
 
 ## 许可与免责

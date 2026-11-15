@@ -17,8 +17,13 @@ license: GPL-3.0
 分开的原因：多数人只需要知识；需要"老师"的人自己开。`personas/` 不是 skills 目录，
 宿主不会自动加载它——用户想用就拷进 `skills/`（SKILL.md 末尾给命令）。
 
-**角色分工**：yt-dlp 负责下载，`scripts/transcribe.py` 负责把音频变文字，
-`scripts/materials.py` 负责读课件，**蒸馏和写作是 LLM（你）的活**，没有别的运行时。
+**角色分工**：yt-dlp 负责下载，`$SKILL_DIR/scripts/transcribe.py` 负责把音频变文字，
+`$SKILL_DIR/scripts/materials.py` 负责读课件，**蒸馏和写作是 LLM（你）的活**，没有别的运行时。
+
+> **路径契约**：`$SKILL_DIR` = **本文件（SKILL.md）所在的目录**，脚本都在它下面的 `scripts/` 里。
+> 任何 runtime：宿主提供 skill 根目录变量的（如 ZCode 的 `${ZCODE_PLUGIN_ROOT}/skills/bilibili-persona`）就用它；
+> 没有的，把 `$SKILL_DIR` 解析为"本文件所在目录"即可。脚本只需 python3，可选依赖缺失时按各阶段说明降级。
+> 移植到别的 agent：见本目录的 `INSTALL.md`。
 
 ## 阶段 0 · 环境自检（只报告，不擅自安装）
 
@@ -38,7 +43,7 @@ ffmpeg -version                      # 云 ASR 切分长音频时需要
 那个端点会被 B 站风控（见下）。用我们的守卫脚本一次拿全：
 
 ```bash
-python "<插件根>/scripts/bili_fetch.py" list <BV号或链接>
+python "$SKILL_DIR/scripts/bili_fetch.py" list <BV号或链接>
 #   p03  01:28  27236959711  03讲 一维问题：薛定谔方程
 ```
 
@@ -69,7 +74,7 @@ B 站会对**视频网页**端点返回 `412 Precondition Failed`，实测同一
 ### 2a. 先查有没有原生字幕（免费、秒级，优先）
 
 ```bash
-python "<插件根>/scripts/bili_fetch.py" subs <BV号> -I 1-3 -o transcripts
+python "$SKILL_DIR/scripts/bili_fetch.py" subs <BV号> -I 1-3 -o transcripts
 ```
 
 它查 `x/player/v2` 的 `data.subtitle.subtitles[]` 并直接把字幕写成和转写**同格式**的
@@ -90,7 +95,7 @@ python "<插件根>/scripts/bili_fetch.py" subs <BV号> -I 1-3 -o transcripts
 export ASR_API_KEY=...                                  # 必需
 export ASR_BASE_URL=https://api.siliconflow.cn/v1        # 任何 OpenAI 兼容端点
 export ASR_MODEL=FunAudioLLM/SenseVoiceSmall
-python "<插件根>/scripts/transcribe.py" downloads/ -o transcripts --engine cloud
+python "$SKILL_DIR/scripts/transcribe.py" downloads/ -o transcripts --engine cloud
 ```
 
 **上传前必须告诉用户**：这一步会把音频传到该服务商；不想上传就用 `--engine local`。
@@ -101,7 +106,7 @@ python "<插件根>/scripts/transcribe.py" downloads/ -o transcripts --engine cl
 
 ```bash
 HF_ENDPOINT=https://hf-mirror.com HF_HUB_DISABLE_XET=1 \
-  python "<插件根>/scripts/transcribe.py" downloads/ -o transcripts
+  python "$SKILL_DIR/scripts/transcribe.py" downloads/ -o transcripts
 ```
 
 - GPU 默认 `large-v3-turbo`，CPU 自动退回 `small`；`--check` 可先自检。
@@ -124,7 +129,7 @@ HF_ENDPOINT=https://hf-mirror.com HF_HUB_DISABLE_XET=1 \
 1. **自动挖候选**（`scripts/glossary.py`，无需 API）：
 
    ```bash
-   python "<插件根>/scripts/glossary.py" transcripts/        -o 术语表.auto.json --reference <知识库>/references/课件笔记
+   python "$SKILL_DIR/scripts/glossary.py" transcripts/        -o 术语表.auto.json --reference <知识库>/references/课件笔记
    ```
 
    两个信号：**同音**（拼音相同、字不同，`pypinyin`）和**差一字**（非同类错误，仅 4 字以上）。
@@ -142,8 +147,8 @@ HF_ENDPOINT=https://hf-mirror.com HF_HUB_DISABLE_XET=1 \
    删掉不同意的条目，然后：
 
    ```bash
-   python "<插件根>/scripts/transcribe.py" --apply-glossary 术语表.auto.json transcripts/ --dry-run
-   python "<插件根>/scripts/transcribe.py" --apply-glossary 术语表.auto.json transcripts/
+   python "$SKILL_DIR/scripts/transcribe.py" --apply-glossary 术语表.auto.json transcripts/ --dry-run
+   python "$SKILL_DIR/scripts/transcribe.py" --apply-glossary 术语表.auto.json transcripts/
    ```
 
    dry-run 报每条命中数；命中超 200 会告警（合法高频词如 ψ 会到几十次，阈值设得高）；
@@ -162,8 +167,8 @@ HF_ENDPOINT=https://hf-mirror.com HF_HUB_DISABLE_XET=1 \
 先自动发现，再解析：
 
 ```bash
-python "<插件根>/scripts/materials.py"                    # 自动找 课件/讲义/materials/ 等目录
-python "<插件根>/scripts/materials.py" 课件/ -o skills/<课程>/references/课件笔记
+python "$SKILL_DIR/scripts/materials.py"                    # 自动找 课件/讲义/materials/ 等目录
+python "$SKILL_DIR/scripts/materials.py" 课件/ -o skills/<课程>/references/课件笔记
 ```
 
 - MD/TXT/PPTX/DOCX/文本型 PDF **全部本地解析，不联网**（opus 只多需要一个 `pypdf`）。
@@ -172,7 +177,7 @@ python "<插件根>/scripts/materials.py" 课件/ -o skills/<课程>/references/
 
 ```bash
 export MINERU_API_TOKEN=...        # mineru.net 免费申请
-python "<插件根>/scripts/materials.py" 扫描件.pdf --cloud-ocr
+python "$SKILL_DIR/scripts/materials.py" 扫描件.pdf --cloud-ocr
 ```
 
   这一步会把文件上传到 mineru.net，**必须用户明确同意**，不要自己加 `--cloud-ocr`。
@@ -181,7 +186,7 @@ python "<插件根>/scripts/materials.py" 扫描件.pdf --cloud-ocr
 ### 3b. 课件插图（给"图文并茂"供料；原则：课件原图，不做模型画图）
 
 ```bash
-python "<插件根>/scripts/illustrate.py" <课件目录> \
+python "$SKILL_DIR/scripts/illustrate.py" <课件目录> \
   -o skills/<课程>/references/images -n skills/<课程>/references/课件笔记
 ```
 
@@ -270,15 +275,15 @@ python "<插件根>/scripts/illustrate.py" <课件目录> \
 
 ```bash
 # 1. 生成分P清单（含 BV，供链接拼接用）
-python "<插件根>/scripts/bili_fetch.py" list <BV号> --json -o course.json
+python "$SKILL_DIR/scripts/bili_fetch.py" list <BV号> --json -o course.json
 
 # 2. 把反引号时间戳改写成 B 站链接（先 dry-run 看改动）
-python "<插件根>/scripts/stamp.py" link <知识库>/references/讲义 --course course.json --dry-run
-python "<插件根>/scripts/stamp.py" link <知识库>/references/讲义 --course course.json
+python "$SKILL_DIR/scripts/stamp.py" link <知识库>/references/讲义 --course course.json --dry-run
+python "$SKILL_DIR/scripts/stamp.py" link <知识库>/references/讲义 --course course.json
 
 # 3. 校验 + 出单页复习笔记
-python "<插件根>/scripts/stamp.py" lint <知识库>/references/讲义
-python "<插件根>/scripts/stamp.py" html <知识库>/references/讲义 -o 复习页.html --course course.json
+python "$SKILL_DIR/scripts/stamp.py" lint <知识库>/references/讲义
+python "$SKILL_DIR/scripts/stamp.py" html <知识库>/references/讲义 -o 复习页.html --course course.json
 ```
 
 `lint` 有缺口时退出码非 0（`--warn` 只报告不失败，给旧笔记用）。
@@ -291,7 +296,7 @@ python "<插件根>/scripts/stamp.py" html <知识库>/references/讲义 -o 复�
 考点汇总 + 明确不考清单）渲染在最前面，后面接全部讲次。
 
 ```bash
-python "<插件根>/scripts/stamp.py" html <知识库>/references/讲义   -o 复习页.html --course course.json --overview <知识库>/references/大纲.md
+python "$SKILL_DIR/scripts/stamp.py" html <知识库>/references/讲义   -o 复习页.html --course course.json --overview <知识库>/references/大纲.md
 ```
 
 ### 复习页排版规范（press 书卷风，已内置于 stamp.py，改样式前先读）
@@ -311,7 +316,7 @@ python "<插件根>/scripts/stamp.py" html <知识库>/references/讲义   -o �
 蒸馏时 LLM 会按术语表纠错，但漏网率不为零。全部讲义写完后，拿**最终词表反扫讲义**：
 
 ```bash
-python "<插件根>/scripts/transcribe.py" --apply-glossary 术语表.json <知识库>/references/讲义 --dry-run
+python "$SKILL_DIR/scripts/transcribe.py" --apply-glossary 术语表.json <知识库>/references/讲义 --dry-run
 ```
 
 逐条判断，只修三类：正文里的术语错误、引用原话时的错字、词表新补条目在旧讲义里的残留。
@@ -333,7 +338,7 @@ python "<插件根>/scripts/transcribe.py" --apply-glossary 术语表.json <知�
 **写完必须跑**：
 
 ```bash
-python "<插件根>/scripts/stamp.py" fxcheck <知识库>/references/讲义
+python "$SKILL_DIR/scripts/stamp.py" fxcheck <知识库>/references/讲义
 ```
 
 0 残留才算完。残留 = 白名单外的新下标组合（每门课的指标记号不同——
