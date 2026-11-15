@@ -44,6 +44,10 @@ https://github.com/sorrowKnight123/video-to-skill-
 装好后 skill 默认启用。不想用市场的话，把 `skills/`、`scripts/`、`personas/_methods/`
 拷进你的项目也一样用。
 
+**其他 agent（Codex / DSH 等）**：本插件没有运行时——`SKILL.md` 是给 AI 读的工作流，
+脚本全是命令行 Python。把上面三个目录放进你的 agent 能读到的位置，让它按 SKILL.md
+执行即可；文中 `<插件根>` 指存放这些文件的目录。规范写了一份，哪个 agent 跑都一样。
+
 ## 产物长什么样
 
 ```
