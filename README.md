@@ -1,282 +1,188 @@
 # bilibili-persona
 
-把一门 B 站网课变成**两样东西**：一份能查的课程知识库，和一个可选的「讲师人格」。
-两个产物分开，因为需求本来就分两种——多数人只想学知识，需要「老师」的人自己开。
+把一门 B 站网课变成**两样东西**：一份能查的课程知识库，和一个能按老师口吻答疑的虚拟讲师。
+给自学网课、却没法向老师提问的人。
+
+> EN: Turn a bilibili course series into a queryable course knowledge base plus an optional
+> "teacher persona" — transcribed locally, terminology auto-corrected, slides illustrated,
+> provenance clickable. One self-contained skill directory, works in any agent.
+
+**自学网课的真实困境**：一门课几十个分P、总长几十小时；字幕缺失或干脆没有；语音识别把
+「薛定谔」写成「薛定恶」还一错五六种；看到一半有疑问，只能去评论区碰运气。
+
+本插件把这些压成一次对话：给它一个 BV 号，它逐分P 转写、自动纠正术语、解析课件和配套资料、
+生成结构化讲义，最后蒸馏出两个 skill。在一门 24 分P / 31 小时的大学网课上实测：
+**4 小时 08 分的音频转写用了 18 分钟**（13.6 倍实时），术语纠错 **4618 处**，24 讲讲义全部落盘。
+
+## 它的形态：一个拷走就能用的目录
 
 ```
-你给一个 BV 号
-   ↓  列分P → 你确认读哪些 → 取字幕（没有就本地转写）→ 读课件 → 每讲结构化
-skills/<课程>/       知识库：大纲、讲义、术语表、课件笔记     ← 默认启用
-personas/<讲师>/     人格：他怎么讲、怎么判断、怎么押考点     ← 默认不启用，要用自己装
+bilibili-persona/
+├── SKILL.md      给 AI 读的完整工作流 + 写作规范（本插件的大脑）
+├── INSTALL.md    装到任何 agent 的说明
+└── scripts/      七个命令行脚本，纯 Python
 ```
 
-实测：在一门 24 分P 的中文网课上，4 小时 08 分音频本地转写用了 **18 分钟**（13.6 倍实时）。
+安装三选一（详见 [`INSTALL.md`](skills/bilibili-persona/INSTALL.md)）：
 
-## 快速开始
+- **ZCode**：设置 → 插件管理 → 发现 → `+` → 粘贴本仓库地址
+- **Claude Code / Codex / 其他**：拷目录 + 对 AI 说一段现成的话
+- **兜底**：不装也行——SKILL.md 本质是份工作流文档，直接丢给任何能读文件、能跑命令的 AI
+
+脚本只需 python3。可选依赖缺失时自动降级：`faster-whisper`（本地转写）、`pypdf`（PDF 课件）、
+`pypinyin`（挖词表）、`ffmpeg`（切分/校验）。
+
+## 两份产物，各管各的
+
+| 产物 | 给谁用 | 默认 |
+|---|---|---|
+| **知识库** `skills/<课程名>/` | 只想学这门课的人：大纲、讲义、术语表、课件笔记、复习页 | 生成并**启用** |
+| **讲师人格** `personas/<讲师名>/` | 想按老师的口吻听课、答疑、押考点的人 | 生成但**不启用** |
+
+分开是刻意的：多数人只需要知识。想要"老师"，一条命令：
 
 ```bash
-# 1. 依赖（yt-dlp 必需；faster-whisper 只在没字幕时需要）
-uv pip install yt-dlp faster-whisper pypdf
+cp -r personas/<讲师名> skills/
+```
 
-# 2. skill 目录（下文所有命令里的 $SKILL_DIR 都指它）
-SKILL_DIR=skills/bilibili-persona
+人格分两层写——**语言风格**（口头禅原句，按出现讲次标注可信度）和**判断与教学法**
+（他先看什么、怎么框定问题、怎么纠错、他亲口说的考点判定规则）。每条都能引回原话和时间点，
+引不回的不写。
 
-# 3. 看看有哪些分P
+## 工作流程
+
+```
+BV 号
+ └→ 列分P → 停下来问你：读全部还是指定哪几门
+     └→ 找文字（三级降级）：① 视频原生字幕 → ② 云 ASR → ③ 本地 faster-whisper
+     └→ 找资料：扫简介/置顶/热评里的网盘和直链，列成清单问你要不要下
+     └→ 读课件：PDF/PPTX/DOCX 解析成带页码锚点的笔记，原图进知识库
+     └→ 纠术语：从转录自动挖同音错字（拼音聚类 + 频次对比），你确认后确定性替换
+     └→ 写讲义：每讲六栏（概念/公式/推导/例题/易混与坑/考点），条目带时间戳、配课件原图
+     └→ 产出：知识库 + 讲师人格 + 单页复习笔记 + 交付报告（缺什么、置信度、AI 使用说明）
+```
+
+每个需要决策的点（读哪些分P、要不要上传音频、要不要云 OCR）都**先问你**；
+不静默安装依赖，不静默上传文件。
+
+## 七个脚本
+
+| 脚本 | 干什么 | 备注 |
+|---|---|---|
+| `bili_fetch.py` | 列分P / 下音频 / 存原生字幕 / **找配套资料** | 直连公开 API；下载串行 + 解码校验；坏 CDN 节点自动换备用 |
+| `transcribe.py` | 转写（云/本地）+ 术语纠错 | `--engine auto\|cloud\|local`；`--check` 自检；断点续跑 |
+| `glossary.py` | **自动挖术语纠错词表**，无需任何 API | 拼音同音聚类 + 频次对比，附证据报告；人工确认后并入 |
+| `materials.py` | 课件解析（本地优先，扫描件可走云 OCR） | 输出带页码锚点 |
+| `illustrate.py` | 课件原图进笔记 | 只取课件里已有的图，**绝不用模型画图** |
+| `stamp.py` | 时间戳链接化 + 两道检查 + 单页复习笔记 | 点 `00:12:34` 跳回原视频那一秒 |
+| `mock_asr.py` | 本地假 ASR 服务 | 无密钥即可验证云转写全链路 |
+
+## 命令速查
+
+```bash
+# $SKILL_DIR 指 skills/bilibili-persona/
+
+# 列分P；--json 生成 course.json 供 stamp.py 使用
 python "$SKILL_DIR/scripts/bili_fetch.py" list BV1xxxxxxxxx
+python "$SKILL_DIR/scripts/bili_fetch.py" list BV1xxxxxxxxx --json -o course.json
 
-# 4. 下音频 + 转写（国内先设镜像，见下方「常见问题」）
+# 找配套资料：扫简介+置顶+热评，网盘只列链接和提取码，绝不自动下载
+python "$SKILL_DIR/scripts/bili_fetch.py" resources BV1xxxxxxxxx --pages 2
+
+# 下音频（串行 + 解码校验；并发会损坏文件，别开）
 python "$SKILL_DIR/scripts/bili_fetch.py" audio BV1xxxxxxxxx -I 1-5 -o downloads
+python "$SKILL_DIR/scripts/bili_fetch.py" verify BV1xxxxxxxxx -o downloads      # 自查完整性
+
+# 转写（本地 GPU；--check 先自检）
+python "$SKILL_DIR/scripts/transcribe.py" --check
 python "$SKILL_DIR/scripts/transcribe.py" downloads/ -o transcripts
 
-# 5. 自动挖术语纠错表（有课件更好；先看证据表再落盘）
-python "$SKILL_DIR/scripts/glossary.py" transcripts/ --reference <知识库>/references/课件笔记 -o 术语表.auto.json
+# 术语纠错：自动挖掘 → 人工确认 → 确定性替换（先 dry-run）
+python "$SKILL_DIR/scripts/glossary.py" transcripts/ --reference 课件笔记/ -o 术语表.auto.json
 python "$SKILL_DIR/scripts/transcribe.py" --apply-glossary 术语表.auto.json transcripts/ --dry-run
+
+# 讲义收尾三连：时间戳链接化 → 强绑检查 → 公式残留检查 → 复习页
+python "$SKILL_DIR/scripts/stamp.py" link    讲义/ --course course.json
+python "$SKILL_DIR/scripts/stamp.py" lint    讲义/
+python "$SKILL_DIR/scripts/stamp.py" fxcheck 讲义/
+python "$SKILL_DIR/scripts/stamp.py" html    讲义/ -o 复习页.html --course course.json --overview 大纲.md
 ```
 
-然后在 ZCode 里说：「帮我把这门课做成知识库 `https://www.bilibili.com/video/BV1xxxxxxxxx`」，
-或者用命令 `/learn-course BV1xxxxxxxxx 1-5`。
+## 笔记为什么不像 AI 写的
 
-## 安装成插件（可选）
+「图文并茂、没有 AI 味」不是靠一句提示词，而是靠一套**可检查的规范**：
 
-ZCode → 设置 → 插件管理 → **发现** → `+` → 添加插件市场，粘贴：
-
-```
-https://github.com/sorrowKnight123/video-to-skill-
-```
-
-装好后 skill 默认启用。不想用市场的话，把 `skills/bilibili-persona/`
-（自包含：SKILL.md + 全部脚本都在这一个目录里）和 `personas/_methods/`
-拷进你的项目也一样用。
-
-**其他 agent（Codex / DSH / Claude Code 等）**：见 **[在任何 agent 里使用](#在任何-agent-里使用)**，
-一页说明 + 一段可以直接复制给 AI 的适配指令。
-
-## 产物长什么样
-
-```
-skills/<课程名>/                     # 知识库（默认启用）
-├── SKILL.md                        # 触发词 + 大纲索引 + 怎么检索
-└── references/
-    ├── 大纲.md                      # 全部讲次 + 每讲核心 + 考点清单
-    ├── 术语表.md                    # 术语 + 读法 + ASR 勘误对照
-    ├── 讲义/01-xxx.md ...           # 每讲一份：概念/公式/推导/例题/易混与坑/考点
-    └── 课件笔记/                    # 课件（PDF/PPTX/DOCX）解析结果，带页码锚点
-
-personas/<讲师名>/                    # 人格（默认不启用）
-├── SKILL.md                        # 语言风格 + 判断与教学法 + 回答规则
-└── references/                     # 原话证据（每条风格特征都能回溯）
-
-transcripts/  downloads/             # 原始字幕与音频（已 gitignore，别提交）
-```
-
-讲义的六栏是刻意的：**先结构化，再写作**。口语里的填充语在最前面就被挡住，
-所以知识库和人格都不会被「这个这个」「啊」这类废话污染。
-
-## 主要能力
-
-| 能力 | 说明 |
-|---|---|
-| **三级降级取文字** | 原生字幕（免费秒出）→ 云 ASR（任何 OpenAI 兼容端点）→ 本地 faster-whisper |
-| **本地转写** | GPU 优先、CPU 自动兜底；`--check` 自检；断点续跑；不需要 torch |
-| **术语纠错** | ASR 对专业课术语错得很系统（实测一个词能有五六种错法），用 JSON 词表确定性纠正 |
-| **读课件** | PDF/PPTX/DOCX/MD/TXT 本地解析；扫描件可选走云 OCR；补上「不读视频画面」丢的公式 |
-| **课件插图** | 课件原图直接进笔记（PDF 整页渲染 / PPTX·DOCX 解包内嵌图），无图课件如实报 0，绝不 AI 画图 |
-| **知识库与人格分离** | 人格生成但默认不启用；还支持叠加教学法（严格推导 / 直觉类比 / 考点导向） |
-| **可溯源** | 讲义条目带 `mm:ss`，有人格的带原话证据；缺证据的地方明确标注而不是编 |
-| **时间戳笔记** | 每条知识点绑真实时间戳，点一下跳回 B 站那一秒；`lint` 强制不许缺、不许编 |
-| **单页复习笔记** | 一个自包含 `.html`（内联 CSS、无 CDN、断网可读）：侧栏目录 + 时间戳可点 + 三线表 |
-
-## 命令参考
-
-| 命令 | 作用 |
-|---|---|
-| `bili_fetch.py list <BV>` | 列分P（序号/时长/cid/标题）；`--json -o course.json` 输出清单给 `stamp.py` 用 |
-| `bili_fetch.py audio <BV> -I 4-24 -o downloads` | 下音频（串行 + 解码校验） |
-| `bili_fetch.py verify <BV> -o downloads` | 校验本地音频是否完整 |
-| `bili_fetch.py subs <BV> -I 1-3 -o transcripts` | 把原生字幕存成和转写同格式的 `.md/.txt` |
-| `bili_fetch.py resources <BV> -o materials` | 从简介/置顶/热评发现配套资料链接；`--fetch` 经确认后只下直链文件，网盘只给链接+提取码 |
-| `transcribe.py downloads/ -o transcripts` | 转写（`--engine auto\|cloud\|local`） |
-| `transcribe.py --check` | 自检设备与模型 |
-| `transcribe.py --apply-glossary 词表.json transcripts/ --dry-run` | 术语纠错（先看命中再落盘） |
-| `materials.py <课件目录> -o <知识库>/references/课件笔记` | 解析课件 |
-| `stamp.py link <讲义目录> --course course.json` | 把 `` `00:12:34` `` 改写成 B 站跳转链接（`--dry-run` 先看） |
-| `stamp.py lint <讲义目录>` | 检查每条知识点是否带时间戳，缺了就退出码非 0 |
-| `stamp.py html <讲义目录> -o 复习页.html` | 生成自包含单页复习笔记 |
-| `mock_asr.py` | 本地假 ASR 服务，无密钥验证云转写链路 |
-| `illustrate.py` | 从课件提取插图到知识库 images/，生成 INDEX.md 供讲义配图 |
-
-`bili_fetch.py` 还有个 `--delay`（默认 1 秒，被限流就调大）和 `--workers`（默认 1，
-**别调大**，见下方常见问题）。
+- **条目化，不逐句转录**：口语填充语（"这个这个"、"啊"、重复、半句）不进讲义
+- **正文零防御性描述**：「转录未读出」「按课件补全」「存疑」这类话不出现在正文——
+  缺的公式用课件原图补，补不上的写一行「注：」放章末
+- **简洁是硬要求**：一条 bullet 一个事实；引用原话每条最多一句；啰嗦是另一种 AI 味
+- **公式记法契约**：源文件用 ASCII 记法（`L̂_z`、`e^{ikx}`），渲染层排版成真上下标
+- **强制时间戳**：每个条目必须带 `mm:ss` 且只能取自转录里真实存在的行——`stamp.py lint`
+  逐条检查（实测 2012 条、缺失 0）；`fxcheck` 检查公式渲染残留
 
 ## 常见问题
 
-### yt-dlp 报 HTTP 412，但接口明明是通的
+**yt-dlp 报 HTTP 412，但接口明明是通的？**
+B 站有两种 412：① yt-dlp 走的**网页端点**被风控（同一时刻公开 API 正常）——用 `bili_fetch.py`；
+② **Python 的 TLS 指纹**被 WAF 拒绝（同一请求 `urllib`/`requests` 412 而 `curl` 200）——
+脚本会自动改用 curl 重试。第二种与登录无关，cookie 解决不了。连 curl 都 412 才是 IP 限流：等几分钟，
+`--delay` 调大。
 
-B 站有两种完全不同的 412：
+**下载的音频大小正常，却解不开？**
+并发下载会静默产生损坏文件（实测 21 个里坏 12 个，字节数接近正确，ffprobe 也报完整时长——
+分片 DASH 的 init 段会撒谎）。所以本项目**默认串行 + 下载后解码校验**，坏就重下而不是按字节续传。
+别开 `--workers`，随时 `verify` 自查。
 
-| 成因 | 表现 | 解法 |
-|---|---|---|
-| **yt-dlp 走的网页端点被风控** | `yt-dlp -f ba` 每个分P 都 412，而同一时刻 `api.bilibili.com` 的公开接口返回 code 0 | 用 `bili_fetch.py`（直连公开 API） |
-| **Python 的 TLS 指纹被 WAF 拒绝** | 同一 URL、同样请求头，`urllib`/`requests` 412，**`curl` 200** | `bili_fetch.py` 会自动改用 curl 重试 |
+**第一次转写卡在下载模型？**
+HuggingFace 国内连不上，且其 Xet 后端没有镜像，两件事都要做：
+`export HF_ENDPOINT=https://hf-mirror.com HF_HUB_DISABLE_XET=1`（PowerShell 用 `$env:`）。
+权重 1.6G，建议 `HF_HOME` 指到大盘。脚本失败时会把这两行打给你。
 
-第二种**跟登录无关，cookie 解决不了**。如果连 curl 也开始 412，那才是 IP 限流：等几分钟，
-把 `--delay` 调大。
+**GPU 用不起来？**
+Windows 上只需保证 `cublas64_12.dll` 在 PATH 里。CTranslate2 4.5+ 的 Windows 轮子默认**不链 cuDNN**，
+网上"必须装 cuDNN 9"的说法对当前版本已不成立。8G 显存用 `int8_float16`。没 GPU 自动退回 CPU（换小模型）。
 
-### 下载下来的音频是坏的，但文件大小看着正常
+**云转写报 404 或返回 HTML？**
+`ASR_BASE_URL` 指向的是对话模型网关，它没有 `/audio/transcriptions`。换真正的语音转写服务
+（如硅基流动 `https://api.siliconflow.cn/v1` + `FunAudioLLM/SenseVoiceSmall`），或用 `--engine local`。
+无密钥验证链路：`python "$SKILL_DIR/scripts/mock_asr.py"`。
 
-实测踩过：4 个并发下载时，21 个文件里 12 个的 AAC 帧损坏，**字节数却接近正确**；
-而 `ffprobe` 也报完整时长——因为分片 DASH 的 init 段会声明完整时长，媒体数据缺了它也不知道。
-
-所以本项目：**默认串行下载**（`--workers 1`，别调大），下载后**用 ffmpeg 解码校验**
-（`ffmpeg -v error -i f -f null -`，0 条错误才算过），失败就重下而不是按字节续传
-（分片容器拼接会产生「大小对、内容坏」的文件）。随时可以用 `bili_fetch.py verify` 自查。
-
-### 第一次转写卡在下载模型
-
-HuggingFace 在国内连不上，且它的 Xet 存储后端**没有镜像**，所以两件事都要做：
-
-```bash
-export HF_ENDPOINT=https://hf-mirror.com HF_HUB_DISABLE_XET=1
-```
-
-```powershell
-$env:HF_ENDPOINT='https://hf-mirror.com'; $env:HF_HUB_DISABLE_XET='1'
-```
-
-权重 1.6G，建议 `HF_HOME` 指到大盘。脚本在下载失败时会直接把这两行打给你。
-
-### GPU 用不起来
-
-Windows 上只有一件事要保证：**`cublas64_12.dll` 能被找到**。
-
-- CTranslate2 4.5+ 的官方 Windows 轮子**默认不再链接 cuDNN**，网上「必须装 cuDNN 9」的说法
-  对当前版本不成立。
-- 报 `Library cublas64_12.dll is not found or cannot be loaded` 时，把 CUDA 的 `bin`
-  （或 `nvidia-cublas-cu12` 的 `bin`）加进 **PATH**——CT2 用裸 `LoadLibraryA` 加载 cuBLAS，
-  `os.add_dll_directory` 对它无效。
-- 8G 显存用 `int8_float16`，别用 `float16`。
-- 没 GPU 会自动退回 CPU（换 `small` 模型），慢一个数量级。
-
-### 云转写报 404 或返回 HTML
-
-说明 `ASR_BASE_URL` 指向的是**对话模型**网关，它没有 `/audio/transcriptions`。
-换一个真正做语音转写的 OpenAI 兼容服务（如硅基流动 `https://api.siliconflow.cn/v1`，
-模型 `FunAudioLLM/SenseVoiceSmall`），或者用 `--engine local` 在本机转。
-
-想在没有密钥的情况下验证云链路，跑 `python "$SKILL_DIR/scripts/mock_asr.py"`，再按它输出的提示调用。
-
-### 需要登录态的内容取不到
-
-用 `--cookie "SESSDATA=..."`。yt-dlp 侧还有三种 cookie 坑：浏览器在运行会锁住 cookie 库
-（完全退出浏览器再试）、Chrome 127+ 的应用绑定加密解不开（换 edge 或导出 `cookies.txt`）、
-firefox 那个 profile 从没用过。
-
-**cookie 属于账号凭据，不要写进仓库、不要贴进对话。**
-
-### 找到的网盘资料为什么不能自动下载
-
-网盘下载要过登录、验证码和风控，自动化不可靠，而且行为和爬虫难以区分。
-所以 `bili_fetch.py resources` 只负责**发现**：把链接和提取码列成清单
-（`materials/资料清单.md`）；你确认后加 `--fetch` 也只下载**直链文件**
-（pdf/zip/压缩包这类不用登录的），网盘的请自己打开。
-
-发现范围默认是当前视频的简介、置顶评论和热评；`--season` 可以把合集里其他分P 的
-简介和置顶也扫一遍（很多 UP 主把资料包挂在合集第一集的置顶里）。分享链接随时可能
-失效，脚本只负责"找到了"——打不开就是失效了，这不是脚本的错。
-
-`materials/` 整个目录已被 gitignore：资料清单里有你的网盘链接和提取码，别提交。
+**需要登录态的内容取不到？**
+`bili_fetch.py` 加 `--cookie "SESSDATA=..."`。yt-dlp 侧的 cookie 三坑（浏览器运行锁库、
+Chrome 应用绑定加密、firefox 空 profile）见 SKILL.md。**cookie 是账号凭据，别写进仓库、别贴进对话。**
 
 ## 依赖
 
-| 依赖 | 什么时候需要 | 安装 |
-|---|---|---|
-| `yt-dlp` | 可选（`bili_fetch.py` 是主路径，yt-dlp 是备选） | `uv pip install yt-dlp` |
-| `faster-whisper` | 本地转写（**不需要 torch**） | `uv pip install faster-whisper` |
-| `pypdf` | 读 PDF 课件 | `uv pip install pypdf` |
-| `pypinyin` | 自动挖术语词表的拼音信号（约 2MB 纯 Python，缺失时跳过该信号） | `uv pip install pypinyin` |
-| `ffmpeg` | 云 ASR 切分长音频、解码校验 | 系统包管理器 / gyan.dev 版 |
-| `MINERU_API_TOKEN` | 扫描件课件走云 OCR 时 | mineru.net 免费申请 |
+| 依赖 | 什么时候需要 |
+|---|---|
+| python3 | 必须 |
+| `yt-dlp` | 可选（`bili_fetch.py` 是主路径） |
+| `faster-whisper` | 本地转写（**不需要 torch**） |
+| `pypdf` | PDF 课件 |
+| `pypinyin` | 自动挖词表（约 2MB 纯 Python，缺失时跳过拼音信号） |
+| `ffmpeg` | 云转写切分、解码校验 |
+| `MINERU_API_TOKEN` | 扫描件课件走云 OCR 时 |
 
-PPTX / DOCX / MD / TXT 课件**不需要任何额外依赖**（用标准库解压取文本）。
+skill 只报告缺什么、给出安装命令，**不会静默安装**，也不会静默上传你的任何文件。
 
-skill 只报告缺什么、给出安装命令，**不会替你静默安装**；也不会静默上传你的文件。
+## 设计取舍：为什么功能这么少
 
-## 核心思路：不拼模型，拼可审计的词表
+**小而美是原则，不是缺陷。** 本插件只做"别的工具从下游补不出来的东西"——
+知识库和人格必须从原始音视频里蒸馏，这是它们的护城河；至于下游能力：
 
-ASR 对中文专业术语的错**不是随机的，是同音替换**——谐振子被听成斜阵子/邪真子/协真子，
-傅里叶变换被听成复利液变换，正确写法常常一次都没出现。这意味着它**可以被机械修正**。
-
-实测（同一门课、同一段音频）：
-
-| 方案 | 术语命中 | 体积 | 速度 |
-|---|---|---|---|
-| whisper-turbo 原始 | 71% | 1.6GB | 20× 实时 |
-| **whisper-turbo + 自动词表** | **100%** | **+0GB** | **20× 实时** |
-| Qwen3-ASR-1.7B | 94% | +6.5GB | 3.4× 实时 |
-
-`glossary.py` 用两个信号挖候选：**同音**（拼音相同、字不同）和**差一字**；
-配对对象是「转录里罕见的词」×「课件里的词 or 转录里高频的词」。三道闸压噪声
-（错法不得在课件出现过、两侧必须是极大 n-gram、候选不含虚词），
-可选再让对话模型逐条裁决。全程可审计：每条都带证据表。
-
-## 设计取舍（明确没做的事）
-
-- **不做视觉理解**（抽帧+视觉模型读画面）：明显更慢更贵。用**课件**补这个缺口——课件整页
-  渲染成插图是零成本例外（无模型参与，截图 ≠ 理解）；无图课件如实报 0，笔记不硬凑图。
-- **不重造轮子**：分块/VAD/纠错/字幕渲染生态里已有成熟实现，我们只做「知识库 + 讲师人格」。
-- **不做** MCP server、GUI、配置文件（用 CLI 参数）、向量库 RAG、思维导图。
-- **不做内置播放器**：插件形态没有宿主 UI 可挂，做播放器就得自带一个 web app。
-  等价且更轻的做法是把时间戳做成 B 站链接——点开浏览器跳到同一秒，任何编辑器里都能用。
-- **不做**学习者状态跟踪（掌握度、复习队列、错误本）——那是带教系统的领域。
-- **只做 B 站**：换平台等真有第二个需求再说。
-
-### 为什么默认不用 Qwen3-ASR
-
-Qwen3-ASR-1.7B 中文术语确实更准（实测同一段课程音频：术语命中 94% vs Whisper 的 71%），
-但代价是**慢 5.9 倍**（3.4× 实时 vs 20×）、体积 6.5GB、时间戳要额外挂对齐模型再自己拼句，
-而且 `hf_hub_download` 在国内镜像下直接不可用、`qwen-asr` 自 2026-01 停更。
-术语准确率我们用词表纠错就能拿到（同一段音频里 Whisper 错的那 4 个术语，词表全修掉了），
-成本近乎零。**所以它不做默认引擎**；需要极限术语准确率时再考虑做成可选引擎。
-
-## 在任何 agent 里使用
-
-skill 目录是**自包含**的（SKILL.md + 全部脚本都在 `skills/bilibili-persona/` 一个目录里），
-拷到哪里都能用：
-
-- **ZCode / Claude Code**：marketplace 安装（格式兼容），或拷目录到各自的 skills 位置
-- **Codex / DSH / 其他**：拷目录 + 对 AI 说一段话——原文在
-  **[`skills/bilibili-persona/INSTALL.md`](skills/bilibili-persona/INSTALL.md)**，复制即可
-- **兜底**：SKILL.md 本质是份工作流文档，直接丢给任何能读文件、能跑命令的 AI 也能用
-
-适配约定只有一条：文中 `$SKILL_DIR` = SKILL.md 所在目录，脚本都在 `$SKILL_DIR/scripts/` 下。
-
-## 目录结构
-
-```
-marketplace.json                       插件市场清单
-.zcode-plugin/plugin.json              插件清单
-commands/learn-course.md               /learn-course <BV号>
-personas/_methods/                     三个教学法叠加层模板
-skills/bilibili-persona/               ← 整个 skill 是自包含的，拷走即用
-├── SKILL.md                           工作流（阶段 0–7）+ 写作规范
-├── INSTALL.md                         装到任何 agent 的说明
-└── scripts/
-    ├── bili_fetch.py                  列分P / 下音频 / 存原生字幕 / 找配套资料
-    ├── transcribe.py                  转写（云/本地）+ 术语纠错
-    ├── stamp.py                       时间戳链接化 + 强绑检查 + 单页复习笔记
-    ├── glossary.py                    自动挖掘术语纠错词表（拼音信号，无需 API）
-    ├── materials.py                   课件解析（本地优先，扫描件可走云 OCR）
-    ├── illustrate.py                  课件原图进笔记（按格式自适应取图）
-    └── mock_asr.py                    假 ASR 服务，验证云链路
-```
+- **思维导图 / 知识图谱**：已经商品化（25+ 同类项目标配），用本插件产出的结构化笔记喂给
+  专门的工具，效果一样甚至更好
+- **云 ASR 不是默认引擎**：本地转写免费、隐私、够快；云端点留给没有 GPU 的人
+- **网盘资料永不自动下载**：只列链接和提取码——要登录、有风控，做成自动下载只会被当成爬虫
+- **抽帧插图 ≠ 视觉理解**：把画面截图嵌进笔记不需要 LLM 读它，所以"图文并茂"与"不烧钱"不冲突
+- **不做**：MCP server、GUI、配置文件（用 CLI 参数）、向量库 RAG、学习进度跟踪、
+  其他视频平台（等真有第二个需求）
 
 ## 许可与免责
 
-**GPL-3.0**（见 `LICENSE`）。复用的第三方代码归属见 `NOTICE`——衍生作品必须同样以 GPL 开源。
+**GPL-3.0**（见 `LICENSE`）。复用的第三方代码归属见 `NOTICE`——衍生作品必须同样开源。
 
 只做**个人学习用途**的本地文字化：不重新分发视频、音频、字幕、课件，不绕过付费墙或 DRM，
-不批量爬取，需要登录态的课程请使用你自己已购买的账号。
-
-- `downloads/`、`transcripts/`、`.cache/`、`_refs/` 已在 `.gitignore` 排除，**不要提交或上传**。
-- 用本工具生成的**知识库与人格可以自由分发**；原始字幕、音视频、课件不可以。
-- 请遵守 B 站用户协议与你所在地区的法律。使用本工具产生的一切后果由使用者自负。
+不批量爬取，需要登录态的课程请使用你自己已购买的账号。`downloads/`、`transcripts/`、
+课件原件已在 `.gitignore` 排除，**不要提交或上传**；生成的知识库与人格可以自由分发。
+请遵守 B 站用户协议与你所在地区的法律，使用产生的后果由使用者自负。
