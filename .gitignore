@@ -9,9 +9,6 @@ cookies.txt
 # 资料清单含网盘分享链接与提取码，属用户资料，不入库
 materials/
 
-# Generated example personas are kept on purpose (see examples/), but a persona you
-# build for yourself in a study workspace usually should not be committed either.
-# skills/*/references/分P笔记/
 
 __pycache__/
 *.pyc
@@ -23,3 +20,10 @@ __pycache__/
 # Third-party reference repos cloned for study (see NOTICE). Never commit these --
 # they are other people's code and would bloat the repo with their full history.
 _refs/
+
+# 比赛材料与报名表：含手机号、学号等个人信息，绝不入库
+_比赛材料/
+光电未来*.docx
+
+# Office 打开文档时生成的锁文件
+~$*

@@ -4,7 +4,7 @@
 拷到任何支持 skill 目录约定的 agent 里就能用；不支持约定的，把 SKILL.md 直接给 AI 读也行。
 
 **只需要 python3**。可选依赖按功能降级：`faster-whisper`（本地转写）、`pypdf`（读 PDF 课件）、
-`pypinyin`（自动挖术语词表）、`ffmpeg`（云转写切分/解码校验）。缺哪个，对应功能提示装哪个，
+`pypinyin`（自动挖术语词表）、`ffmpeg`（解码校验、课件原图提取）。缺哪个，对应功能提示装哪个，
 其余功能照常。
 
 ## ZCode

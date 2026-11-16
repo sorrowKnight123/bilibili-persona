@@ -146,7 +146,11 @@ def lesson_number(path: Path) -> int | None:
 
 def mineru_parse(paths: list[Path], workdir: Path, model_version: str, language: str) -> dict[str, list[tuple[str, str]]]:
     """Send scanned PDFs to mineru.net and bring back Markdown. Only called with --cloud-ocr."""
-    import requests
+    try:
+        import requests
+    except ImportError:
+        raise SystemExit("[error] --cloud-ocr needs requests:  pip install requests\n"
+                         "        (local parsing of MD/TXT/PPTX/DOCX/text-PDF needs nothing extra)")
 
     if not MINERU_TOKEN:
         raise SystemExit(

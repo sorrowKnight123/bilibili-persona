@@ -17,8 +17,8 @@ license: GPL-3.0
 分开的原因：多数人只需要知识；需要"老师"的人自己开。`personas/` 不是 skills 目录，
 宿主不会自动加载它——用户想用就拷进 `skills/`（SKILL.md 末尾给命令）。
 
-**角色分工**：yt-dlp 负责下载，`$SKILL_DIR/scripts/transcribe.py` 负责把音频变文字，
-`$SKILL_DIR/scripts/materials.py` 负责读课件，**蒸馏和写作是 LLM（你）的活**，没有别的运行时。
+**角色分工**：`bili_fetch.py` 负责列分P、下音频、取字幕，`transcribe.py` 负责把音频变文字，
+`materials.py` 负责读课件，**蒸馏和写作是 LLM（你）的活**，没有别的运行时。
 
 > **路径契约**：`$SKILL_DIR` = **本文件（SKILL.md）所在的目录**，脚本都在它下面的 `scripts/` 里。
 > 任何 runtime：宿主提供 skill 根目录变量的（如 ZCode 的 `${ZCODE_PLUGIN_ROOT}/skills/bilibili-persona`）就用它；
@@ -28,19 +28,25 @@ license: GPL-3.0
 ## 阶段 0 · 环境自检（只报告，不擅自安装）
 
 ```bash
-yt-dlp --version                     # 必需
-python -c "import faster_whisper"    # 只有走到本地转写才需要
-python -c "import pypdf"             # 只有读 PDF 课件才需要
-ffmpeg -version                      # 云 ASR 切分长音频时需要
+python3 --version                    # 必需
+python -c "import faster_whisper"    # 本地转写（没有字幕的课都要）
+python -c "import pypdf"             # 读 PDF 课件文字
+python -c "import pymupdf"           # 从 PDF 里取课件原图（illustrate.py）
+python -c "import pypinyin"          # 自动挖术语词表（缺失则跳过拼音信号）
+ffmpeg -version                      # 解码校验、课件原图提取
 ```
+
+`yt-dlp` **不是必需**：下载与字幕都走 `bili_fetch.py` 直连公开接口，代码里并不调用它，
+只在需要浏览器 cookie 兜底时作为手工备选。课件的 MD/TXT/PPTX/DOCX 用标准库解析，
+**不需要额外依赖**；只有 PDF 文字要 `pypdf`、PDF 取图要 `PyMuPDF`。
 
 缺什么就**给命令让用户自己装**，不要静默安装。**信任边界**贯穿全程：不静默装依赖、
 不静默上传文件、不静默改用户机器上的任何东西。
 
 ## 阶段 1 · 列分P 并强制确认范围
 
-`yt-dlp --flat-playlist` 对 B 站只给序号、**拿不到标题**（实测），而且它的元数据来自**视频网页**，
-那个端点会被 B 站风控（见下）。用我们的守卫脚本一次拿全：
+不用 yt-dlp 的原因：它的 `--flat-playlist` 对 B 站只给序号、**拿不到标题**（实测），
+而且它的元数据来自**视频网页**，那个端点会被 B 站风控（见下）。所以用我们的守卫脚本一次拿全：
 
 ```bash
 python "$SKILL_DIR/scripts/bili_fetch.py" list <BV号或链接>
@@ -64,12 +70,12 @@ B 站会对**视频网页**端点返回 `412 Precondition Failed`，实测同一
 
 | 情况 | 用什么 |
 |---|---|
-| 拿分P/元数据/音频/字幕 | `scripts/bili_fetch.py`（走公开接口，公开视频不需要 cookie） |
+| 拿分P/元数据/音频/字幕 | `$SKILL_DIR/scripts/bili_fetch.py`（走公开接口，公开视频不需要 cookie） |
 | 它报 412 | 说明 IP 被限流了，**等几分钟**，并把 `--delay` 调大（默认 1 秒） |
 | 需要登录态的内容 | `--cookie "SESSDATA=..."`，**绝不写进仓库或贴进对话** |
 | yt-dlp 报 412 | 同一个原因。别急着上 cookie，先试 `bili_fetch.py` |
 
-## 阶段 2 · 拿文字（三级降级）
+## 阶段 2 · 拿文字（两层：原生字幕优先，其次本地转写）
 
 ### 2a. 先查有没有原生字幕（免费、秒级，优先）
 
@@ -89,20 +95,7 @@ python "$SKILL_DIR/scripts/bili_fetch.py" subs <BV号> -I 1-3 -o transcripts
   3. firefox 找不到 cookies 库 → 那个 profile 没用过，换浏览器
 - **绝不把 cookie / cookies.txt 写进仓库或贴进对话。**
 
-### 2b. 云 ASR（无 GPU 用户的主力）
-
-```bash
-export ASR_API_KEY=...                                  # 必需
-export ASR_BASE_URL=https://api.siliconflow.cn/v1        # 任何 OpenAI 兼容端点
-export ASR_MODEL=FunAudioLLM/SenseVoiceSmall
-python "$SKILL_DIR/scripts/transcribe.py" downloads/ -o transcripts --engine cloud
-```
-
-**上传前必须告诉用户**：这一步会把音频传到该服务商；不想上传就用 `--engine local`。
-（硅基流动有免费额度；任何 OpenAI 兼容端点都能插，包括你自己搭的服务。）
-脚本会自动用 ffmpeg 切分长音频（多数服务限制 ~25MB，90 分钟课程约 50MB）并合并结果。
-
-### 2c. 本地 ASR（默认，隐私最好）
+### 2b. 本地转写（没有字幕时的唯一路径）
 
 ```bash
 HF_ENDPOINT=https://hf-mirror.com HF_HUB_DISABLE_XET=1 \
@@ -117,12 +110,17 @@ HF_ENDPOINT=https://hf-mirror.com HF_HUB_DISABLE_XET=1 \
 - 产出 `transcripts/<名>.md`（带时间戳，用来引用）和 `.txt`（纯文本，用来读）。
   已完成的自动跳过，中断重跑即续上。**开跑前先确认目录非空也可以秒退**（不需要加载模型）。
 
-### 2d. 术语纠错（核心创新，也是本插件相对「换大模型」的胜负手）
+> 这层不联网、不上传任何音频。早期版本曾提供过「OpenAI 兼容云 ASR」作为中间层，
+> 因为没有可用的 ASR 服务做真实验证、且它按 15 分钟一段只产出一行（时间轴不可用），
+> 已整体移除——宁可少一个引擎，不留一条没验证过的链路。
+
+### 2c. 术语纠错（核心创新，也是本插件相对「换大模型」的胜负手）
 
 专业课 ASR 的错误**不是随机的，是同音替换**：斜阵子/邪真子/协真子 都是「谐振子」，
 复利液变换 是「傅里叶变换」。正确写法常常一次都没出现，而错法各有两三处。
-这决定了它可以被机械修正——实测同一门课，词表覆盖到位后术语命中从 71% 到 100%，
-超过了 4.7GB 的 Qwen3-ASR-1.7B（94%），而成本是零字节、零耗时。
+这决定了它可以被机械修正——实测同一门课：250 条词表共修正 **4618 处**，其中「宇称」被读成
+「语称」38 次、「径向」被读成「镜像」31 次、「谐振子」有五六种错法（斜阵子/邪真子/协真子…）。
+成本是零字节、零耗时、完全可复核。
 
 三步：
 

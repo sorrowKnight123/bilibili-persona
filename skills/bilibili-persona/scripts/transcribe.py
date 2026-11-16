@@ -1,44 +1,28 @@
 #!/usr/bin/env python3
 """Turn lecture audio into timestamped transcripts, and clean up ASR term errors.
 
-Three transcript sources, tried in the order the SKILL.md workflow dictates:
-  1. the video's own subtitles  -- fetched with yt-dlp, no code needed here
-  2. a cloud ASR endpoint       -- any OpenAI-compatible /audio/transcriptions
-  3. local faster-whisper       -- GPU first, CPU fallback, no torch required
+This is the last tier of the text ladder: bili_fetch.py fetches the video's own
+subtitles when they exist, and anything still missing is transcribed here on this
+machine with faster-whisper (GPU first, CPU fallback, no torch required).
 
     python transcribe.py --check                       # verify device + model, then stop
-    python transcribe.py downloads/ -o transcripts      # auto: cloud if configured, else local
-    python transcribe.py downloads/ --engine local
+    python transcribe.py downloads/ -o transcripts      # transcribe a directory
     python transcribe.py --apply-glossary terms.json -o transcripts --dry-run
-
-Engine choice: `auto` uses the cloud endpoint when ASR_API_KEY is set, otherwise local.
 """
 
 import argparse
 import json
-import os
 import re
-import shutil
-import subprocess
 import sys
 import time
 from pathlib import Path
 
 AUDIO_EXTS = {".m4a", ".mp3", ".wav", ".flac", ".aac", ".opus", ".webm", ".mp4", ".mkv"}
 TEXT_EXTS = (".md", ".txt", ".srt")
-GLOSSARY_EXTS = (".json",)
 
 # turbo is the accuracy/speed sweet spot for lecture audio; small is the CPU default
 # because turbo on CPU is slower than a 2-hour-lecture budget allows.
 MODEL_GPU, MODEL_CPU = "large-v3-turbo", "small"
-
-# Cloud ASR: any OpenAI-compatible /audio/transcriptions endpoint. Most providers cap
-# uploads around 25 MB, and a 90-minute lecture is ~50 MB, so audio gets split first.
-CLOUD_BASE = os.getenv("ASR_BASE_URL", "https://api.openai.com/v1")
-CLOUD_MODEL = os.getenv("ASR_MODEL", "whisper-1")
-CLOUD_KEY = os.getenv("ASR_API_KEY", "")
-SEGMENT_SECONDS = 900
-FFMPEG = os.getenv("FFMPEG") or shutil.which("ffmpeg") or "ffmpeg"
 
 # The Hub is unreachable from mainland China, and its newer Xet storage backend has no
 # mirror, so the mirror alone is not enough -- Xet must be off. Every user there hits
@@ -47,11 +31,6 @@ DOWNLOAD_HINT = """[hint] could not download the model weights. If you are in ma
        PowerShell:  $env:HF_ENDPOINT='https://hf-mirror.com'; $env:HF_HUB_DISABLE_XET='1'
        bash:        export HF_ENDPOINT=https://hf-mirror.com HF_HUB_DISABLE_XET=1
        Or pick a smaller --model (e.g. small) / use --device cpu."""
-
-CLOUD_HINT = """[hint] no cloud ASR configured, using local faster-whisper. To use a cloud endpoint instead:
-       export ASR_API_KEY=...            # required
-       export ASR_BASE_URL=https://api.siliconflow.cn/v1   # any OpenAI-compatible endpoint
-       export ASR_MODEL=FunAudioLLM/SenseVoiceSmall"""
 
 
 # --------------------------------------------------------------------------- local
@@ -115,76 +94,6 @@ def local_segments(model, audio: Path, language: str | None):
             pct = f"{seg.end / total * 100:5.1f}%" if total else "  ?  "
             print(f"\r  {pct} {hms(seg.end)}/{hms(total)}", end="", flush=True)
             yield seg.start, text
-
-
-# --------------------------------------------------------------------------- cloud
-
-def ffmpeg_split(audio: Path, workdir: Path, seconds: int) -> list[tuple[Path, float]]:
-    """Cut audio into upload-sized pieces. Returns [(path, start_offset_seconds)]."""
-    if not shutil.which(FFMPEG):
-        raise SystemExit(f"[error] --engine cloud needs ffmpeg to split long audio ({FFMPEG} not found)")
-    workdir.mkdir(parents=True, exist_ok=True)
-    pattern = workdir / f"{audio.stem}.%03d.mp3"
-    for stale in workdir.glob(f"{audio.stem}.*.mp3"):
-        stale.unlink()
-    subprocess.run(
-        [FFMPEG, "-v", "error", "-i", str(audio), "-f", "segment",
-         "-segment_time", str(seconds), "-acodec", "libmp3lame", "-q:a", "4", "-y", str(pattern)],
-        check=True, capture_output=True,
-    )
-    parts = sorted(workdir.glob(f"{audio.stem}.*.mp3"))
-    if not parts:
-        raise SystemExit(f"[error] ffmpeg produced no audio segments for {audio.name}")
-    return [(p, i * float(seconds)) for i, p in enumerate(parts)]
-
-
-def cloud_segments(audio: Path, workdir: Path, base: str, model: str, key: str, language: str | None):
-    """Yield (seconds, text) from an OpenAI-compatible transcription endpoint."""
-    import requests
-
-    url = f"{base.rstrip('/')}/audio/transcriptions"
-    headers = {"Authorization": f"Bearer {key}"}
-    for part, offset in ffmpeg_split(audio, workdir, SEGMENT_SECONDS):
-        for attempt in range(1, 4):
-            if attempt > 1:
-                time.sleep(min(2**attempt, 30))
-                print(f"\r  retry {attempt}/3 {part.name}", flush=True)
-            with part.open("rb") as fh:
-                resp = requests.post(
-                    url, headers=headers,
-                    files={"file": (part.name, fh, "audio/mpeg")},
-                    data={"model": model, **({"language": language} if language else {})},
-                    timeout=900,
-                )
-            if resp.status_code == 200:
-                break
-            if resp.status_code in (429, 500, 502, 503, 504):
-                continue
-            body = resp.text[:300].strip()
-            if resp.status_code in (401, 403):
-                raise SystemExit(f"[error] cloud ASR refused the key ({resp.status_code}). "
-                                 f"Check ASR_API_KEY. Server said: {body[:160]}")
-            if resp.status_code == 404 or body[:1] == "<":
-                # The usual cause is a chat-model gateway: it serves /chat/completions and
-                # answers an HTML 404 here, which is confusing if we just dump the page.
-                raise SystemExit(
-                    f"[error] {url} does not offer /audio/transcriptions (HTTP {resp.status_code}).\n"
-                    f"        ASR_BASE_URL must point at a service that does speech-to-text --\n"
-                    f"        e.g. 硅基流动 https://api.siliconflow.cn/v1 with ASR_MODEL=FunAudioLLM/SenseVoiceSmall,\n"
-                    f"        or any OpenAI-compatible ASR endpoint. Chat-model gateways do not work.\n"
-                    f"        Use --engine local to transcribe on this machine instead."
-                )
-            raise SystemExit(f"[error] cloud ASR rejected the request ({resp.status_code}): {body}")
-        else:
-            raise SystemExit(f"[error] cloud ASR failed after 3 attempts on {part.name}")
-
-        payload = resp.json()
-        text = (payload.get("text") or "").strip()
-        if text:
-            print(f"\r  {part.name} -> {len(text)} chars", end="", flush=True)
-            # The endpoint returns one block per segment; keep it as a single line at the
-            # segment's start offset. We do not get word timings back from every provider.
-            yield offset, " ".join(text.split())
 
 
 # --------------------------------------------------------------------------- glossary
@@ -276,9 +185,6 @@ def write_outputs(stem: str, segments: list[tuple[float, str]], outdir: Path) ->
     if not txt:
         raise SystemExit(f"[error] no speech detected in {stem}")
     outdir.mkdir(parents=True, exist_ok=True)
-    # ponytail: no word-level timings from every provider, so cloud output is one line per
-    # ~15 min segment. Fine for distillation (which reads the .txt); switch to a provider
-    # that returns segments when per-sentence timestamps start mattering.
     (outdir / f"{stem}.md").write_text("\n".join(md) + "\n", encoding="utf-8")
     (outdir / f"{stem}.txt").write_text("\n".join(txt) + "\n", encoding="utf-8")
     print(f"\r  done {len(txt)} lines -> {stem}.md, {stem}.txt")
@@ -306,9 +212,8 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("inputs", nargs="*", help="audio files and/or directories")
     ap.add_argument("-o", "--outdir", default="transcripts", help="where .md/.txt go (default: transcripts)")
-    ap.add_argument("--engine", choices=["auto", "cloud", "local"], default="auto",
-                    help="auto: cloud when ASR_API_KEY is set, else local")
-    ap.add_argument("--model", help=f"whisper model for --engine local (default: {MODEL_GPU} on GPU, {MODEL_CPU} on CPU)")
+    ap.add_argument("--engine", choices=["local"], default="local", help=argparse.SUPPRESS)
+    ap.add_argument("--model", help=f"faster-whisper model (default: {MODEL_GPU} on GPU, {MODEL_CPU} on CPU)")
     ap.add_argument("--device", choices=["auto", "cuda", "cpu"], default="auto")
     ap.add_argument("--language", default="zh", help="'auto' to detect (default: zh)")
     ap.add_argument("--cpu-threads", type=int, help="default: all cores")
@@ -326,12 +231,6 @@ def main() -> int:
     language = None if args.language == "auto" else args.language
     outdir = Path(args.outdir)
 
-    use_cloud = args.engine == "cloud" or (args.engine == "auto" and bool(CLOUD_KEY))
-    if args.engine == "cloud" and not CLOUD_KEY:
-        raise SystemExit("[error] --engine cloud requires ASR_API_KEY")
-    if args.engine == "auto" and not CLOUD_KEY:
-        print(CLOUD_HINT, file=sys.stderr)
-
     model = name = None
     if args.check:
         device, compute_type = pick_device(args.device)
@@ -340,10 +239,6 @@ def main() -> int:
 
         model.transcribe(np.zeros(16000, dtype=np.float32), beam_size=1)
         print(f"[ok] {name} on {device}/{compute_type} can transcribe")
-        if CLOUD_KEY:
-            print(f"[ok] cloud ASR configured: {CLOUD_BASE} model={CLOUD_MODEL}")
-        else:
-            print("[info] no cloud ASR configured (ASR_API_KEY unset)")
         return 0
 
     # Decide what still needs work before paying for a model load: re-running over an
@@ -355,20 +250,16 @@ def main() -> int:
     if not todo:
         print(f"[info] nothing to do: all {len(files)} file(s) already transcribed in {outdir}/")
         return 0
-    if model is None and not use_cloud:
+    if model is None:
         device, compute_type = pick_device(args.device)
         model, name, device = load_model(args.model, device, compute_type, args.cpu_threads)
 
-    where = f"cloud {CLOUD_MODEL}" if use_cloud else f"local {name}"
-    print(f"[info] engine: {where}; {len(files)} file(s), {len(files) - len(todo)} already done, {len(todo)} to go")
+    print(f"[info] engine: local {name}; {len(files)} file(s), {len(files) - len(todo)} already done, {len(todo)} to go")
     started = time.time()
     for i, f in enumerate(todo, 1):
         print(f"\n[{i}/{len(todo)}] {f.name}", flush=True)
         t0 = time.time()
-        if use_cloud:
-            segments = list(cloud_segments(f, outdir / "_segments", CLOUD_BASE, CLOUD_MODEL, CLOUD_KEY, language))
-        else:
-            segments = list(local_segments(model, f, language))
+        segments = list(local_segments(model, f, language))
         write_outputs(f.stem, segments, outdir)
         print(f"  elapsed {hms(time.time() - t0)}")
     if len(todo) > 1:
