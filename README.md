@@ -17,10 +17,11 @@
 ## 它的形态：一个拷走就能用的目录
 
 ```
-bilibili-persona/
+skills/bilibili-persona/     ← 拷走的只有这个目录
 ├── SKILL.md      给 AI 读的完整工作流 + 写作规范（本插件的大脑）
 ├── INSTALL.md    装到任何 agent 的说明
-└── scripts/      七个命令行脚本，纯 Python
+└── scripts/      六个命令行脚本，纯 Python
+bench/           ASR 评测打分器（不属于 skill，只是可复核的证据）
 ```
 
 安装三选一（详见 [`INSTALL.md`](skills/bilibili-persona/INSTALL.md)）：
@@ -29,8 +30,8 @@ bilibili-persona/
 - **Claude Code / Codex / 其他**：拷目录 + 对 AI 说一段现成的话
 - **兜底**：不装也行——SKILL.md 本质是份工作流文档，直接丢给任何能读文件、能跑命令的 AI
 
-脚本只需 python3。可选依赖缺失时自动降级：`faster-whisper`（本地转写）、`pypdf`（PDF 课件）、
-`pypinyin`（挖词表）、`ffmpeg`（切分/校验）。
+脚本只需 python3。可选依赖缺失时自动降级：`faster-whisper`（本地转写）、`pypdf`（PDF 课件文字）、
+`PyMuPDF`（PDF 取图）、`pypinyin`（挖词表）、`ffmpeg`（解码校验/取图）。
 
 ## 两份产物，各管各的
 
@@ -106,6 +107,26 @@ python "$SKILL_DIR/scripts/stamp.py" lint    讲义/
 python "$SKILL_DIR/scripts/stamp.py" fxcheck 讲义/
 python "$SKILL_DIR/scripts/stamp.py" html    讲义/ -o 复习页.html --course course.json --overview 大纲.md
 ```
+
+## 术语纠错到底提升了多少（实测）
+
+专业课 ASR 的错误不是随机的，是同音替换：一个「谐振子」能被读成斜阵子/邪真子/协真子五六种。
+所以它可以被机械修正。一次小样本评测（**2 分钟片段、17 个术语、人工核对金标**）：
+
+| 处理 | CER | 术语命中 |
+|---|---|---|
+| Whisper large-v3-turbo 原始 | 8.06% | 12/17 = 71% |
+| ＋完整 250 条词表 | 5.45% | 14/17 = 82% |
+| ＋完整词表＋3 个新词 | **4.50%** | **17/17 = 100%** |
+| Qwen3-ASR-1.7B（磁盘 4.4GB，无词表） | 9.24% | 16/17 = 94% |
+
+同一台机器上 Whisper 约 20× 实时，Qwen3-ASR-1.7B 约 3.4×。
+
+**口径必须一起说**：单样本，不能外推成总体准确率；金标以 Whisper 输出为底人工校正，
+所以 CER 不能读作「谁更准」；100% 那行用的是确定性替换，不是自动挖词的全自动流程。
+打分脚本在 [`bench/score_asr.py`](bench/score_asr.py)，口径与限制见 [`bench/README.md`](bench/README.md)。
+
+在真实课程上的另一组数字：250 条词表在 10 讲转录里共修正 **4618 处**。
 
 ## 笔记为什么不像 AI 写的
 
