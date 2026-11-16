@@ -55,7 +55,7 @@ cp -r personas/<讲师名> skills/
 ```
 BV 号
  └→ 列分P → 停下来问你：读全部还是指定哪几门
-     └→ 找文字（两层）：① 视频原生字幕 → ② 本地 faster-whisper 转写
+     └→ 找文字（两层）：① 视频原生字幕 → ② 本地转写（faster-whisper 运行 Whisper large-v3-turbo）
      └→ 找资料：扫简介/置顶/热评里的网盘和直链，列成清单问你要不要下
      └→ 读课件：PDF/PPTX/DOCX 解析成带页码锚点的笔记，原图进知识库
      └→ 纠术语：从转录自动挖同音错字（拼音聚类 + 频次对比），你确认后确定性替换
@@ -71,7 +71,7 @@ BV 号
 | 脚本 | 干什么 | 备注 |
 |---|---|---|
 | `bili_fetch.py` | 列分P / 下音频 / 存原生字幕 / **找配套资料** | 直连公开 API；下载串行 + 解码校验；坏 CDN 节点自动换备用 |
-| `transcribe.py` | 本地转写（faster-whisper）+ 术语纠错 | `--check` 自检；断点续跑；GPU 优先、CPU 自动兜底 |
+| `transcribe.py` | 本地转写（faster-whisper + large-v3-turbo）+ 术语纠错 | `--check` 自检；断点续跑；GPU 优先、CPU 自动兜底 |
 | `glossary.py` | **自动挖术语纠错词表**，无需任何 API | 拼音同音聚类 + 频次对比，附证据报告；人工确认后并入 |
 | `materials.py` | 课件解析（本地优先，扫描件可走云 OCR） | 输出带页码锚点；`--cloud-ocr` 未实测 |
 | `illustrate.py` | 课件原图进笔记 | 只取课件里已有的图，**绝不用模型画图** |
@@ -181,7 +181,7 @@ Chrome 应用绑定加密、firefox 空 profile）见 SKILL.md。**cookie 是账
 |---|---|
 | python3 | 必须 |
 | `yt-dlp` | 可选（`bili_fetch.py` 是主路径） |
-| `faster-whisper` | 本地转写（**不需要 torch**） |
+| `faster-whisper` | 本地转写：库本身（**不需要 torch**）；GPU 默认加载 large-v3-turbo 权重，CPU 退回 small |
 | `pypdf` | PDF 课件文字 |
 | `PyMuPDF` | 从 PDF 里取课件原图（`illustrate.py`） |
 | `Pillow` | 可选，只用来过滤过小的图 |
